@@ -200,6 +200,53 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + self._active_deferred_agent_worker_count()
         )
 
+    def _live_work_kind_counts(self) -> dict:
+        """Non-mutating, content-free counts sampled from in-memory gateway state.
+
+        Unlike gateway_state.json active_agents, these counts are recomputed
+        for THIS request, not replayed from a heartbeat. No session names,
+        model IDs, job identifiers, prompts or tool outputs leave this method.
+
+        UNKNOWN is mandatory on any unreadable source; a missing source is
+        never interpreted as zero by a diagnostic observer.
+        """
+        kinds = ("chat", "managed", "cron", "api", "deferred")
+        sampled_at_unix_ms = int(time.time() * 1000)
+        unknown = {
+            "status": "unknown",
+            "sampled_at_unix_ms": sampled_at_unix_ms,
+            "pid": os.getpid(),
+            "kind_counts": None,
+            "total": None,
+            "diagnostic_only": True,
+        }
+        try:
+            adapter = self.adapters.get(Platform.API_SERVER)
+            api_count = getattr(adapter, "active_agent_work_count", None)
+            if not callable(api_count):
+                return unknown
+            values = (
+                self._running_agent_count(),
+                managed_turn_count(self),
+                self._running_cron_job_count(),
+                api_count(diagnostic_strict=True),
+                self._active_deferred_agent_worker_count(),
+            )
+            if any(type(value) is not int or not (0 <= value <= 1000000)
+                   for value in values):
+                return unknown
+            counts = dict(zip(kinds, values))
+        except Exception:
+            return unknown
+        return {
+            "status": "live",
+            "sampled_at_unix_ms": sampled_at_unix_ms,
+            "pid": os.getpid(),
+            "kind_counts": counts,
+            "total": sum(values),
+            "diagnostic_only": True,
+        }
+
     @staticmethod
     def _running_cron_job_count() -> int:
         # The FULL work aggregate, not _running_agent_count(): cron jobs run on the scheduler's own thread
