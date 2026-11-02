@@ -78,6 +78,7 @@ _STATIC_FEATURE_FLAGS = {
 # feature is advertised only while that "features" flag is truthy on this listener.
 _CAPABILITY_ENDPOINTS = (
     ("health", ("GET", "/health")), ("health_detailed", ("GET", "/health/detailed")),
+    ("health_work_types", ("GET", "/health/work-types")),
     ("models", ("GET", "/v1/models")), ("model_options", ("GET", "/api/model/options")),
     ("chat_completions", ("POST", "/v1/chat/completions")),
     ("responses", ("POST", "/v1/responses")), ("runs", ("POST", "/v1/runs")),
@@ -1193,14 +1194,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._metrics_last_request_at: Optional[float] = None
         self._metrics_last_heartbeat_at: Optional[float] = None
 
-    def active_agent_work_count(self) -> int:
-        """All live agent work: pending admissions + in-flight turns + live /v1/runs tasks
-        (task-based, since ``_active_run_agents`` has a queued-before-agent gap)."""
+    def active_agent_work_count(self, *, diagnostic_strict: bool = False) -> int:
+        """All live agent work, with strict failure for read-only diagnostic probes.
+
+        The shutdown path preserves legacy best-effort zero on failure.
+        Diagnostic callers MUST receive UNKNOWN instead of a false idle zero.
+        """
         try:
             return (int(getattr(self, "_pending_agent_requests", 0))
                     + int(self._inflight_agent_runs)
                     + sum(not task.done() for task in self._active_run_tasks.values()))
         except Exception:
+            if diagnostic_strict:
+                raise
             return 0
 
     def interrupt_active_runs(self, reason: str) -> int:
@@ -1649,6 +1655,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         routes: list[tuple] = [
             ("GET", "/health", self._handle_health),
             ("GET", "/health/detailed", self._handle_health_detailed),
+            ("GET", "/health/work-types", self._handle_health_work_types),
             ("GET", "/v1/health", self._handle_health),
             ("GET", "/v1/models", self._handle_models),
             ("GET", "/api/model/options", self._handle_model_options),
@@ -2412,6 +2419,45 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "exit_reason": runtime.get("exit_reason"),
             # Contract: RFC3339 string | null, never a number (legacy epoch floats exist).
             "updated_at": normalize_updated_at(runtime.get("updated_at")), "pid": os.getpid()})
+
+    @_require_auth
+    async def _handle_health_work_types(self, request: web.Request) -> web.Response:
+        """Loopback-only live work-kind counts. No identifiers or activity content."""
+        from ipaddress import ip_address
+
+        # Inspect the REAL socket peer, not a spoofable forwarding header.
+        peer = (request.transport.get_extra_info("peername")
+                if request.transport is not None else None)
+        try:
+            if not peer or not ip_address(peer[0]).is_loopback:
+                return web.json_response({"status": "forbidden"}, status=403)
+        except (ValueError, TypeError, IndexError):
+            return web.json_response({"status": "forbidden"}, status=403)
+        # The default listener's runner is not the selected profile runner.
+        # An explicit subprofile route would risk cross-account attribution.
+        if _api_request_profile.get() not in (None, "default"):
+            return web.json_response({"status": "forbidden"}, status=403)
+        # Startup normally refuses a missing API_SERVER_KEY, but the shared
+        # auth wrapper tolerates keyless default-profile test configurations.
+        # This sensitive diagnostic must ALWAYS require an actual key.
+        try:
+            if not self._expected_api_key():
+                return web.json_response({"status": "forbidden"}, status=403)
+        except Exception:
+            return web.json_response({"status": "forbidden"}, status=403)
+        runner = self.gateway_runner or request.app.get("gateway_runner")
+        probe = getattr(runner, "_live_work_kind_counts", None)
+        if not callable(probe):
+            return web.json_response({"status": "unknown"}, status=503)
+        try:
+            result = probe()
+            if not isinstance(result, dict) or result.get("status") != "live":
+                return web.json_response({"status": "unknown"}, status=503)
+        except Exception:
+            return web.json_response({"status": "unknown"}, status=503)
+        # Result is constructed by our own allowlisted GatewayRunner method,
+        # never from raw runtime JSON or session objects.
+        return web.json_response(result)
 
     @_require_auth
     async def _handle_models(self, request: web.Request) -> web.Response:
