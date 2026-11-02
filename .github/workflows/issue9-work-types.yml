@@ -1,0 +1,51 @@
+name: Issue 9 — pinned Hermes work-type diagnostics
+
+on:
+  push:
+    branches:
+      - feat/issue9-live-work-types-bf0203a
+  pull_request:
+    branches:
+      - base/pinned-bf0203a
+    paths:
+      - gateway/run_shutdown.py
+      - gateway/platforms/api_server.py
+      - tests/gateway/test_issue9_live_work_types.py
+      - .github/workflows/issue9-work-types.yml
+
+permissions:
+  contents: read
+
+jobs:
+  live-work-types:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout the candidate
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - name: Setup pinned uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.1"
+      - name: Prepare Python 3.14
+        run: uv python install 3.14
+      - name: Install locked project test dependencies
+        run: uv sync --python 3.14 --group dev --group test --no-install-project --frozen
+      - name: Install pinned aiohttp optional API dependency
+        run: uv pip install --python .venv/bin/python aiohttp==3.14.5
+      - name: Check syntax and style
+        run: |
+          .venv/bin/ruff check gateway/run_shutdown.py gateway/platforms/api_server.py tests/gateway/test_issue9_live_work_types.py
+          git diff --check
+      - name: Native runtime behavior and shutdown regression tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          .venv/bin/python -m pytest -q --disable-warnings \
+            tests/gateway/test_issue9_live_work_types.py \
+            tests/gateway/test_api_server_active_work_drain.py \
+            tests/gateway/test_drain_active_work_report.py \
+            tests/gateway/test_gateway_shutdown.py \
+            tests/gateway/test_readiness.py
