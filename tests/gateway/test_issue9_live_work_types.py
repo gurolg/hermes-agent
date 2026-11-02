@@ -114,6 +114,7 @@ def test_api_count_preserves_existing_shutdown_semantics():
 @pytest.mark.asyncio
 async def test_local_endpoint_denies_unauthenticated_and_returns_safe_live_counts():
     adapter = APIServerAdapter(PlatformConfig(enabled=True))
+    adapter._api_key = "TEST_ONLY_NOT_A_REAL_SECRET_0123456789"
     report = {
         "status": "live",
         "sampled_at_unix_ms": 1790000000000,
@@ -142,6 +143,21 @@ async def test_local_endpoint_denies_unauthenticated_and_returns_safe_live_count
             received = await resp.json()
             assert received == report
             assert "SECRET_" not in json.dumps(received)
+
+
+@pytest.mark.asyncio
+async def test_keyless_default_profile_is_forbidden_even_if_generic_auth_allows_it():
+    adapter = APIServerAdapter(PlatformConfig(enabled=True))
+    adapter._api_key = ""
+    adapter.gateway_runner = SimpleNamespace(
+        _live_work_kind_counts=lambda: {"status": "live", "total": 0})
+    app = web.Application()
+    app.router.add_get("/health/work-types", adapter._handle_health_work_types)
+    async with TestClient(TestServer(app, host="127.0.0.1")) as client:
+        with patch.object(adapter, "_check_auth", return_value=None):
+            response = await client.get("/health/work-types")
+            assert response.status == 403
+            assert await response.json() == {"status": "forbidden"}
 
 
 @pytest.mark.asyncio
@@ -175,6 +191,7 @@ async def test_endpoint_rejects_other_profile_and_external_socket():
 @pytest.mark.asyncio
 async def test_endpoint_missing_runner_fails_without_raw_error_text():
     adapter = APIServerAdapter(PlatformConfig(enabled=True))
+    adapter._api_key = "TEST_ONLY_NOT_A_REAL_SECRET_0123456789"
     adapter.gateway_runner = None
     req = SimpleNamespace(
         transport=SimpleNamespace(get_extra_info=lambda key: ("127.0.0.1", 1234)),

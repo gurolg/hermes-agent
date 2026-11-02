@@ -2437,6 +2437,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         # An explicit subprofile route would risk cross-account attribution.
         if _api_request_profile.get() not in (None, "default"):
             return web.json_response({"status": "forbidden"}, status=403)
+        # Startup normally refuses a missing API_SERVER_KEY, but the shared
+        # auth wrapper tolerates keyless default-profile test configurations.
+        # This sensitive diagnostic must ALWAYS require an actual key.
+        try:
+            if not self._expected_api_key():
+                return web.json_response({"status": "forbidden"}, status=403)
+        except Exception:
+            return web.json_response({"status": "forbidden"}, status=403)
         runner = self.gateway_runner or request.app.get("gateway_runner")
         probe = getattr(runner, "_live_work_kind_counts", None)
         if not callable(probe):
